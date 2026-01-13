@@ -35,6 +35,7 @@ interface SpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
+  maxAlternatives: number;
   start(): void;
   stop(): void;
   abort(): void;
@@ -65,7 +66,23 @@ export const useSpeechRecognition = ({
   const [interimTranscript, setInterimTranscript] = useState("");
   
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const shouldBeListeningRef = useRef(false);
+  const restartTimeoutRef = useRef<NodeJS.Timeout>();
+  const consecutiveRestartsRef = useRef(0);
+  const lastStartTimeRef = useRef<number>(0);
+  const isSafariRef = useRef(false);
+  const onResultRef = useRef(onResult);
+  const onErrorRef = useRef(onError);
+  const onPermissionDeniedRef = useRef(onPermissionDenied);
 
+  // Keep callbacks updated
+  useEffect(() => {
+    onResultRef.current = onResult;
+    onErrorRef.current = onError;
+    onPermissionDeniedRef.current = onPermissionDenied;
+  }, [onResult, onError, onPermissionDenied]);
+
+  // Initialize recognition ONCE on mount
   useEffect(() => {
     // Check browser support
     const SpeechRecognitionAPI = 
@@ -77,22 +94,68 @@ export const useSpeechRecognition = ({
       return;
     }
 
+    // Detect Safari - it has issues with continuous mode
+    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+    isSafariRef.current = isSafari;
+    console.log("Browser detection - isSafari:", isSafari);
+
     const recognition = new SpeechRecognitionAPI();
-    recognition.continuous = continuous;
+    // Safari works better without continuous mode
+    recognition.continuous = isSafari ? false : continuous;
     recognition.interimResults = true;
     recognition.lang = language;
+    recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
       console.log("Speech recognition started");
       setIsListening(true);
+      lastStartTimeRef.current = Date.now();
+      consecutiveRestartsRef.current = 0; // Reset counter on successful start
     };
 
     recognition.onend = () => {
-      console.log("Speech recognition ended");
+      const timeSinceStart = Date.now() - lastStartTimeRef.current;
+      console.log("Speech recognition ended (ran for", timeSinceStart, "ms)");
       setIsListening(false);
+      
+      // Only auto-restart in continuous mode (non-Safari)
+      // In Safari (non-continuous), restart happens in onresult after each recognition
+      const effectiveContinuous = isSafariRef.current ? false : continuous;
+      
+      if (shouldBeListeningRef.current && effectiveContinuous) {
+        // Check if we're in a restart loop (ended too quickly)
+        if (timeSinceStart < 500) {
+          consecutiveRestartsRef.current++;
+          console.log("Quick restart detected, count:", consecutiveRestartsRef.current);
+          
+          // If too many quick restarts, stop to prevent infinite loop
+          if (consecutiveRestartsRef.current > 5) {
+            console.error("Too many quick restarts - stopping auto-restart");
+            shouldBeListeningRef.current = false;
+            onErrorRef.current?.("O reconhecimento de voz não está funcionando. Tente novamente.");
+            return;
+          }
+        } else {
+          consecutiveRestartsRef.current = 0;
+        }
+        
+        console.log("Auto-restarting recognition (continuous mode)...");
+        clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = setTimeout(() => {
+          if (shouldBeListeningRef.current && recognitionRef.current) {
+            try {
+              recognitionRef.current.start();
+            } catch (error) {
+              console.error("Failed to auto-restart:", error);
+              shouldBeListeningRef.current = false;
+            }
+          }
+        }, 300);
+      }
     };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
+      console.log("Got speech result!");
       let finalTranscript = "";
       let interimResult = "";
 
@@ -106,28 +169,76 @@ export const useSpeechRecognition = ({
       }
 
       if (finalTranscript) {
+        console.log("Final transcript:", finalTranscript);
         setTranscript(prev => prev + " " + finalTranscript);
-        onResult?.(finalTranscript.trim().toLowerCase());
+        onResultRef.current?.(finalTranscript.trim().toLowerCase());
+        
+        // For Safari (non-continuous mode), restart recognition after getting result
+        if (shouldBeListeningRef.current && isSafariRef.current) {
+          console.log("Restarting after result (Safari non-continuous mode)");
+          setTimeout(() => {
+            if (shouldBeListeningRef.current && recognitionRef.current) {
+              try {
+                recognitionRef.current.start();
+              } catch (e) {
+                console.error("Error restarting after result:", e);
+              }
+            }
+          }, 100);
+        }
       }
       
+      if (interimResult) {
+        console.log("Interim result:", interimResult);
+      }
       setInterimTranscript(interimResult);
     };
 
-    recognition.onerror = (event) => {
+    recognition.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error);
-      onError?.(event.error);
+      console.log("Full error event:", JSON.stringify({
+        error: event.error,
+        message: event.message,
+        type: event.type
+      }));
       
-      if (event.error !== "no-speech") {
+      // Handle critical errors that should stop recognition
+      const criticalErrors = ["not-allowed", "aborted", "audio-capture", "network", "service-not-allowed"];
+      if (criticalErrors.includes(event.error)) {
+        console.error("CRITICAL ERROR detected:", event.error);
+        shouldBeListeningRef.current = false;
+        clearTimeout(restartTimeoutRef.current);
         setIsListening(false);
+        if (event.error === "not-allowed") {
+          setHasPermission(false);
+          onPermissionDeniedRef.current?.();
+        }
+        onErrorRef.current?.(event.error);
+      } else if (event.error !== "no-speech") {
+        // Non-critical errors still get reported but don't stop recognition
+        console.warn("Non-critical error:", event.error);
+        onErrorRef.current?.(event.error);
+      } else {
+        console.log("no-speech error - this is normal when there's silence");
       }
     };
 
     recognitionRef.current = recognition;
 
     return () => {
-      recognition.abort();
+      // Final cleanup on unmount
+      console.log("Cleaning up recognition on unmount");
+      shouldBeListeningRef.current = false;
+      clearTimeout(restartTimeoutRef.current);
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (e) {
+          // Ignore errors on abort
+        }
+      }
     };
-  }, [language, continuous, onResult, onError]);
+  }, []); // Empty deps - only create once
 
   // Request microphone permission explicitly
   const requestMicrophonePermission = useCallback(async (): Promise<boolean> => {
@@ -148,28 +259,55 @@ export const useSpeechRecognition = ({
   }, [onPermissionDenied]);
 
   const startListening = useCallback(async () => {
-    if (!recognitionRef.current || !isSupported) return;
-    
-    // Request permission first if we haven't yet
-    if (hasPermission !== true) {
-      const granted = await requestMicrophonePermission();
-      if (!granted) {
-        onError?.("Permissão do microfone negada. Por favor, permita o acesso ao microfone nas configurações do navegador.");
-        return;
-      }
+    if (!recognitionRef.current || !isSupported) {
+      console.log("Cannot start - no recognition or not supported");
+      return;
     }
     
+    console.log("Starting listening...");
+    
     try {
+      // Set flag that we want to be listening
+      shouldBeListeningRef.current = true;
+      
       setTranscript("");
       setInterimTranscript("");
       recognitionRef.current.start();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error starting speech recognition:", error);
+      setIsListening(false);
+      
+      // Handle specific error types
+      if (error.name === "InvalidStateError") {
+        // Recognition is already started, try to restart
+        console.log("InvalidStateError, attempting to restart...");
+        try {
+          recognitionRef.current.stop();
+          await new Promise(resolve => setTimeout(resolve, 100));
+          recognitionRef.current.start();
+        } catch (retryError) {
+          console.error("Failed to restart recognition:", retryError);
+          shouldBeListeningRef.current = false;
+          onErrorRef.current?.("Não foi possível iniciar o reconhecimento de voz. Tente novamente.");
+        }
+      } else if (error.name === "NotAllowedError" || error.message?.includes("permission")) {
+        shouldBeListeningRef.current = false;
+        setHasPermission(false);
+        onPermissionDeniedRef.current?.();
+        onErrorRef.current?.("Permissão do microfone negada.");
+      } else {
+        shouldBeListeningRef.current = false;
+        onErrorRef.current?.("Erro ao iniciar reconhecimento de voz.");
+      }
     }
-  }, [isSupported, hasPermission, requestMicrophonePermission, onError]);
+  }, [isSupported]);
 
   const stopListening = useCallback(() => {
     if (!recognitionRef.current) return;
+    
+    // Set flag that we don't want to be listening anymore
+    shouldBeListeningRef.current = false;
+    clearTimeout(restartTimeoutRef.current);
     
     try {
       recognitionRef.current.stop();
