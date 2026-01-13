@@ -99,7 +99,6 @@ const Reading = () => {
   // Process spoken words and match against expected
   const processSpokenWords = useCallback((transcript: string) => {
     const spokenWords = extractWords(transcript);
-    console.log("Processing spoken words:", spokenWords);
     
     spokenWords.forEach((spokenWord) => {
       if (currentWordIndex >= words.length) return;
@@ -107,10 +106,7 @@ const Reading = () => {
       const expectedWord = words[currentWordIndex];
       const isMatch = wordsMatch(spokenWord, expectedWord);
       
-      console.log(`Checking: "${spokenWord}" vs expected "${expectedWord}" = ${isMatch ? "✓ MATCH" : "✗ no match"}`);
-      
       if (isMatch) {
-        console.log(`✓ Advancing from word ${currentWordIndex} (${expectedWord}) to ${currentWordIndex + 1}`);
         
         // Mark current word as correct
         setWordStatuses(prev => {
@@ -131,6 +127,25 @@ const Reading = () => {
           celebrationTimeoutRef.current = setTimeout(() => {
             setShowCelebration(false);
           }, 1000);
+        }
+      } else if (currentWordIndex + 1 < words.length) {
+        // Check if it matches the NEXT word (allow skipping difficult words)
+        const nextWord = words[currentWordIndex + 1];
+        const isNextMatch = wordsMatch(spokenWord, nextWord);
+        
+        if (isNextMatch) {
+          // Mark current as skipped, next as current
+          setWordStatuses(prev => {
+            const newStatuses = [...prev];
+            newStatuses[currentWordIndex] = "incorrect"; // Mark skipped word
+            newStatuses[currentWordIndex + 1] = "correct"; // Mark matched word as correct
+            if (currentWordIndex + 2 < words.length) {
+              newStatuses[currentWordIndex + 2] = "current";
+            }
+            return newStatuses;
+          });
+          
+          setCurrentWordIndex(prev => prev + 2); // Skip to word after next
         }
       }
     });

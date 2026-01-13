@@ -141,12 +141,15 @@ export const useSpeechRecognition = ({
           if (shouldBeListeningRef.current && recognitionRef.current) {
             try {
               recognitionRef.current.start();
-            } catch (error) {
-              console.error("Failed to auto-restart:", error);
-              shouldBeListeningRef.current = false;
+            } catch (error: any) {
+              // Ignore InvalidStateError - recognition is already running
+              if (error.name !== "InvalidStateError") {
+                console.error("Failed to auto-restart:", error);
+                shouldBeListeningRef.current = false;
+              }
             }
           }
-        }, 150); // Reduced from 300ms to 150ms for faster restart
+        }, 100); // Increased delay for more stable restart
       }
     };
 
@@ -173,23 +176,34 @@ export const useSpeechRecognition = ({
         
         // For Safari (non-continuous mode), restart recognition after getting result
         if (shouldBeListeningRef.current && isSafariRef.current) {
+          // Small delay to ensure previous recognition has fully stopped
           setTimeout(() => {
             if (shouldBeListeningRef.current && recognitionRef.current) {
               try {
+                // Only start if not already listening (prevents InvalidStateError)
                 recognitionRef.current.start();
               } catch (e) {
-                console.error("Error restarting after result:", e);
+                // If already started, just ignore the error and continue
+                if (e.name !== "InvalidStateError") {
+                  console.error("Error restarting after result:", e);
+                }
               }
             }
-          }, 50);
+          }, 100); // Increased delay to ensure clean restart
         }
       }
       // Interim results are set but not processed for matching
     };
 
     recognition.onerror = (event: any) => {
+      // "aborted" errors are expected during restarts in Safari - ignore them
+      if (event.error === "aborted" && shouldBeListeningRef.current) {
+        // Restart is happening, this is expected
+        return;
+      }
+      
       // Handle critical errors that should stop recognition
-      const criticalErrors = ["not-allowed", "aborted", "audio-capture", "network", "service-not-allowed"];
+      const criticalErrors = ["not-allowed", "audio-capture", "network", "service-not-allowed"];
       if (criticalErrors.includes(event.error)) {
         console.error("Speech recognition critical error:", event.error);
         shouldBeListeningRef.current = false;
@@ -200,11 +214,11 @@ export const useSpeechRecognition = ({
           onPermissionDeniedRef.current?.();
         }
         onErrorRef.current?.(event.error);
-      } else if (event.error !== "no-speech") {
+      } else if (event.error !== "no-speech" && event.error !== "aborted") {
         // Non-critical errors still get reported but don't stop recognition
         onErrorRef.current?.(event.error);
       }
-      // "no-speech" errors are normal during silence and can be ignored
+      // "no-speech" and "aborted" errors are normal and can be ignored
     };
 
     recognitionRef.current = recognition;
@@ -252,26 +266,20 @@ export const useSpeechRecognition = ({
       setInterimTranscript("");
       recognitionRef.current.start();
     } catch (error: any) {
-      setIsListening(false);
-      
       // Handle specific error types
       if (error.name === "InvalidStateError") {
-        // Recognition is already started, try to restart
-        try {
-          recognitionRef.current.stop();
-          await new Promise(resolve => setTimeout(resolve, 100));
-          recognitionRef.current.start();
-        } catch (retryError) {
-          shouldBeListeningRef.current = false;
-          onErrorRef.current?.("Não foi possível iniciar o reconhecimento de voz. Tente novamente.");
-        }
+        // Recognition is already started - this is fine, just continue
+        // Don't need to do anything, it's already listening
+        return;
       } else if (error.name === "NotAllowedError" || error.message?.includes("permission")) {
         shouldBeListeningRef.current = false;
         setHasPermission(false);
+        setIsListening(false);
         onPermissionDeniedRef.current?.();
         onErrorRef.current?.("Permissão do microfone negada.");
       } else {
         shouldBeListeningRef.current = false;
+        setIsListening(false);
         onErrorRef.current?.("Erro ao iniciar reconhecimento de voz.");
       }
     }
