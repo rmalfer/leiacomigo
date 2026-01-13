@@ -99,6 +99,7 @@ const Reading = () => {
   // Process spoken words and match against expected
   const processSpokenWords = useCallback((transcript: string) => {
     const spokenWords = extractWords(transcript);
+    console.log("Processing spoken words:", spokenWords);
     
     spokenWords.forEach((spokenWord) => {
       if (currentWordIndex >= words.length) return;
@@ -106,7 +107,11 @@ const Reading = () => {
       const expectedWord = words[currentWordIndex];
       const isMatch = wordsMatch(spokenWord, expectedWord);
       
+      console.log(`Checking: "${spokenWord}" vs expected "${expectedWord}" = ${isMatch ? "✓ MATCH" : "✗ no match"}`);
+      
       if (isMatch) {
+        console.log(`✓ Advancing from word ${currentWordIndex} (${expectedWord}) to ${currentWordIndex + 1}`);
+        
         // Mark current word as correct
         setWordStatuses(prev => {
           const newStatuses = [...prev];

@@ -107,7 +107,6 @@ export const useSpeechRecognition = ({
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
-      console.log("Speech recognition started");
       setIsListening(true);
       lastStartTimeRef.current = Date.now();
       consecutiveRestartsRef.current = 0; // Reset counter on successful start
@@ -115,7 +114,6 @@ export const useSpeechRecognition = ({
 
     recognition.onend = () => {
       const timeSinceStart = Date.now() - lastStartTimeRef.current;
-      console.log("Speech recognition ended (ran for", timeSinceStart, "ms)");
       setIsListening(false);
       
       // Only auto-restart in continuous mode (non-Safari)
@@ -126,7 +124,6 @@ export const useSpeechRecognition = ({
         // Check if we're in a restart loop (ended too quickly)
         if (timeSinceStart < 1000) {
           consecutiveRestartsRef.current++;
-          console.log("Quick restart detected, count:", consecutiveRestartsRef.current);
           
           // If too many quick restarts, stop to prevent infinite loop
           if (consecutiveRestartsRef.current > 5) {
@@ -139,7 +136,6 @@ export const useSpeechRecognition = ({
           consecutiveRestartsRef.current = 0;
         }
         
-        console.log("Auto-restarting recognition (continuous mode)...");
         clearTimeout(restartTimeoutRef.current);
         restartTimeoutRef.current = setTimeout(() => {
           if (shouldBeListeningRef.current && recognitionRef.current) {
@@ -155,7 +151,6 @@ export const useSpeechRecognition = ({
     };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      console.log("Got speech result!");
       let finalTranscript = "";
       let interimResult = "";
 
@@ -168,15 +163,16 @@ export const useSpeechRecognition = ({
         }
       }
 
-      // Process final results
+      // Set interim transcript for display (but don't process for matching yet)
+      setInterimTranscript(interimResult);
+      
+      // Only process FINAL results for word matching
       if (finalTranscript) {
-        console.log("Final transcript:", finalTranscript);
         setTranscript(prev => prev + " " + finalTranscript);
         onResultRef.current?.(finalTranscript.trim().toLowerCase());
         
         // For Safari (non-continuous mode), restart recognition after getting result
         if (shouldBeListeningRef.current && isSafariRef.current) {
-          console.log("Restarting after result (Safari non-continuous mode)");
           setTimeout(() => {
             if (shouldBeListeningRef.current && recognitionRef.current) {
               try {
@@ -185,31 +181,17 @@ export const useSpeechRecognition = ({
                 console.error("Error restarting after result:", e);
               }
             }
-          }, 50); // Reduced from 100ms to 50ms for faster restart
+          }, 50);
         }
       }
-      
-      // Also process interim results for better UX
-      if (interimResult) {
-        console.log("Interim result:", interimResult);
-        // Send interim results too for immediate feedback
-        onResultRef.current?.(interimResult.trim().toLowerCase());
-      }
-      setInterimTranscript(interimResult);
+      // Interim results are set but not processed for matching
     };
 
     recognition.onerror = (event: any) => {
-      console.error("Speech recognition error:", event.error);
-      console.log("Full error event:", JSON.stringify({
-        error: event.error,
-        message: event.message,
-        type: event.type
-      }));
-      
       // Handle critical errors that should stop recognition
       const criticalErrors = ["not-allowed", "aborted", "audio-capture", "network", "service-not-allowed"];
       if (criticalErrors.includes(event.error)) {
-        console.error("CRITICAL ERROR detected:", event.error);
+        console.error("Speech recognition critical error:", event.error);
         shouldBeListeningRef.current = false;
         clearTimeout(restartTimeoutRef.current);
         setIsListening(false);
@@ -220,18 +202,15 @@ export const useSpeechRecognition = ({
         onErrorRef.current?.(event.error);
       } else if (event.error !== "no-speech") {
         // Non-critical errors still get reported but don't stop recognition
-        console.warn("Non-critical error:", event.error);
         onErrorRef.current?.(event.error);
-      } else {
-        console.log("no-speech error - this is normal when there's silence");
       }
+      // "no-speech" errors are normal during silence and can be ignored
     };
 
     recognitionRef.current = recognition;
 
     return () => {
       // Final cleanup on unmount
-      console.log("Cleaning up recognition on unmount");
       shouldBeListeningRef.current = false;
       clearTimeout(restartTimeoutRef.current);
       if (recognitionRef.current) {
@@ -263,12 +242,7 @@ export const useSpeechRecognition = ({
   }, [onPermissionDenied]);
 
   const startListening = useCallback(async () => {
-    if (!recognitionRef.current || !isSupported) {
-      console.log("Cannot start - no recognition or not supported");
-      return;
-    }
-    
-    console.log("Starting listening...");
+    if (!recognitionRef.current || !isSupported) return;
     
     try {
       // Set flag that we want to be listening
@@ -278,19 +252,16 @@ export const useSpeechRecognition = ({
       setInterimTranscript("");
       recognitionRef.current.start();
     } catch (error: any) {
-      console.error("Error starting speech recognition:", error);
       setIsListening(false);
       
       // Handle specific error types
       if (error.name === "InvalidStateError") {
         // Recognition is already started, try to restart
-        console.log("InvalidStateError, attempting to restart...");
         try {
           recognitionRef.current.stop();
           await new Promise(resolve => setTimeout(resolve, 100));
           recognitionRef.current.start();
         } catch (retryError) {
-          console.error("Failed to restart recognition:", retryError);
           shouldBeListeningRef.current = false;
           onErrorRef.current?.("Não foi possível iniciar o reconhecimento de voz. Tente novamente.");
         }

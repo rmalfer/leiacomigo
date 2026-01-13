@@ -14,14 +14,20 @@ export const wordsMatch = (spoken: string, expected: string): boolean => {
   const normalizedExpected = normalizeText(expected);
   
   // Exact match
-  if (normalizedSpoken === normalizedExpected) return true;
+  if (normalizedSpoken === normalizedExpected) {
+    return true;
+  }
   
-  // Check if spoken contains the expected word
-  if (normalizedSpoken.includes(normalizedExpected)) return true;
+  // Check if expected word is contained in spoken (for multi-word captures)
+  // But only if spoken is not too much longer (prevent skipping multiple words)
+  if (normalizedSpoken.includes(normalizedExpected) && 
+      normalizedSpoken.length <= normalizedExpected.length + 10) {
+    return true;
+  }
   
-  // Check similarity for slight pronunciation differences
+  // Fuzzy matching for typos/pronunciation differences
   const similarity = calculateSimilarity(normalizedSpoken, normalizedExpected);
-  return similarity > 0.7; // 70% similarity threshold
+  return similarity > 0.75; // 75% threshold - balanced between strict and permissive
 };
 
 // Simple Levenshtein-based similarity
