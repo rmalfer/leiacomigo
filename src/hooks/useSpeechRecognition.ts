@@ -124,7 +124,7 @@ export const useSpeechRecognition = ({
       
       if (shouldBeListeningRef.current && effectiveContinuous) {
         // Check if we're in a restart loop (ended too quickly)
-        if (timeSinceStart < 500) {
+        if (timeSinceStart < 1000) {
           consecutiveRestartsRef.current++;
           console.log("Quick restart detected, count:", consecutiveRestartsRef.current);
           
@@ -150,7 +150,7 @@ export const useSpeechRecognition = ({
               shouldBeListeningRef.current = false;
             }
           }
-        }, 300);
+        }, 150); // Reduced from 300ms to 150ms for faster restart
       }
     };
 
@@ -168,6 +168,7 @@ export const useSpeechRecognition = ({
         }
       }
 
+      // Process final results
       if (finalTranscript) {
         console.log("Final transcript:", finalTranscript);
         setTranscript(prev => prev + " " + finalTranscript);
@@ -184,12 +185,15 @@ export const useSpeechRecognition = ({
                 console.error("Error restarting after result:", e);
               }
             }
-          }, 100);
+          }, 50); // Reduced from 100ms to 50ms for faster restart
         }
       }
       
+      // Also process interim results for better UX
       if (interimResult) {
         console.log("Interim result:", interimResult);
+        // Send interim results too for immediate feedback
+        onResultRef.current?.(interimResult.trim().toLowerCase());
       }
       setInterimTranscript(interimResult);
     };
