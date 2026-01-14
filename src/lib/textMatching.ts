@@ -15,19 +15,37 @@ export const wordsMatch = (spoken: string, expected: string): boolean => {
   
   // Exact match
   if (normalizedSpoken === normalizedExpected) {
+    console.log(`    ✓ Exact match`);
     return true;
   }
   
-  // Check if expected word is contained in spoken (for multi-word captures)
-  // But only if spoken is not too much longer (prevent skipping multiple words)
-  if (normalizedSpoken.includes(normalizedExpected) && 
-      normalizedSpoken.length <= normalizedExpected.length + 10) {
-    return true;
+  // Only use fuzzy matching if words are similar in length
+  // This prevents "desde" matching "vez", etc.
+  const lengthDiff = Math.abs(normalizedSpoken.length - normalizedExpected.length);
+  
+  // For very short words (1-2 letters), allow more length difference but require high similarity
+  if (normalizedExpected.length <= 2 && lengthDiff <= 2) {
+    const similarity = calculateSimilarity(normalizedSpoken, normalizedExpected);
+    if (similarity >= 0.6) {
+      console.log(`    ✓ Short word match (${(similarity * 100).toFixed(0)}% similar)`);
+      return true;
+    }
   }
   
-  // Fuzzy matching for typos/pronunciation differences
-  const similarity = calculateSimilarity(normalizedSpoken, normalizedExpected);
-  return similarity > 0.75; // 75% threshold - balanced between strict and permissive
+  // For normal words, require similar length and good similarity
+  if (lengthDiff <= 2) {
+    const similarity = calculateSimilarity(normalizedSpoken, normalizedExpected);
+    if (similarity >= 0.8) {
+      console.log(`    ✓ Fuzzy match (${(similarity * 100).toFixed(0)}% similar)`);
+      return true;
+    }
+    console.log(`    ✗ No match (similarity: ${(similarity * 100).toFixed(0)}%, need 80%+)`);
+  } else {
+    console.log(`    ✗ No match (length diff: ${lengthDiff} chars)`);
+  }
+  
+  // If lengths are very different, no match
+  return false;
 };
 
 // Simple Levenshtein-based similarity

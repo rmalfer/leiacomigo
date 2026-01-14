@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ReadingWord, WordStatus } from "@/components/ReadingWord";
@@ -44,7 +44,10 @@ const Reading = () => {
   const { id } = useParams();
   
   const story = STORIES_DATA[id || "2"] || STORIES_DATA["2"];
-  const words = story.text.split(/\s+/);
+  
+  // CRITICAL: Memoize words array to prevent recreation on every render
+  // Without this, words array changes every render, causing infinite loops
+  const words = useMemo(() => story.text.split(/\s+/), [story.text]);
   
   const [currentWordIndex, setCurrentWordIndex] = useState(0);
   const [wordStatuses, setWordStatuses] = useState<WordStatus[]>(
@@ -56,12 +59,31 @@ const Reading = () => {
 
   const progress = (currentWordIndex / words.length) * 100;
   const isComplete = currentWordIndex >= words.length;
+  
+  // Log only on mount
+  useEffect(() => {
+    console.log("\n📖 Reading component MOUNTED");
+    console.log("Story:", story.title);
+    console.log("Total words:", words.length);
+  }, []); // Empty deps = runs once on mount
+  
+  // Monitor currentWordIndex changes
+  useEffect(() => {
+    console.log("📍 currentWordIndex changed to:", currentWordIndex);
+  }, [currentWordIndex]);
+  
+  // Monitor wordStatuses changes
+  useEffect(() => {
+    console.log("🎨 wordStatuses changed:", wordStatuses.slice(0, Math.min(5, wordStatuses.length)));
+    console.log("   Breakdown:", wordStatuses.slice(0, 5).map((status, i) => `${words[i]}:${status}`).join(", "));
+  }, [wordStatuses]); // words is now memoized, no need in deps
 
   // Speech Recognition Hook
   const { 
     isListening, 
     isSupported: isRecognitionSupported,
     hasPermission,
+    interimTranscript,
     startListening,
     stopListening,
     resetTranscript,
@@ -98,68 +120,105 @@ const Reading = () => {
 
   // Process spoken words and match against expected
   const processSpokenWords = useCallback((transcript: string) => {
+    // Safety check: don't process if not listening anymore
+    if (!isListening) {
+      console.log("⚠️ Ignoring transcript - not listening");
+      return;
+    }
+    
     const spokenWords = extractWords(transcript);
     
-    spokenWords.forEach((spokenWord) => {
-      if (currentWordIndex >= words.length) return;
+    console.log("\n=== Processing transcript:", transcript);
+    console.log("=== Extracted words:", spokenWords);
+    console.log("=== Starting at index:", currentWordIndex);
+    console.log("=== Expected word:", currentWordIndex < words.length ? words[currentWordIndex] : "NONE (finished)");
+    
+    // Use local variable to track index during batch processing
+    // This fixes the bug where currentWordIndex doesn't update during forEach
+    let localWordIndex = currentWordIndex;
+    
+    spokenWords.forEach((spokenWord, idx) => {
+      if (localWordIndex >= words.length) return;
       
-      const expectedWord = words[currentWordIndex];
+      const expectedWord = words[localWordIndex];
+      console.log(`\n[Word ${idx}] Checking: spoken="${spokenWord}" vs expected="${expectedWord}" (index ${localWordIndex})`);
+      
       const isMatch = wordsMatch(spokenWord, expectedWord);
       
+      console.log(`  Result: ${isMatch ? "✓ MATCH" : "✗ NO MATCH"}`);
+      
+      // Warn if Safari heard something completely different
+      if (!isMatch && spokenWord.length > 2 && expectedWord.length > 2) {
+        const lengthDiff = Math.abs(spokenWord.length - expectedWord.length);
+        if (lengthDiff > 2) {
+          console.warn(`  ⚠️ Safari heard "${spokenWord}" but expected "${expectedWord}" - very different!`);
+        }
+      }
+      
       if (isMatch) {
+        // CRITICAL: Capture the index value BEFORE any state updates
+        // to prevent closure capturing wrong value
+        const indexToMark = localWordIndex;
         
-        // Mark current word as correct
+        console.log(`\n🎉🎉🎉 WORD MARKED AS CORRECT! 🎉🎉🎉`);
+        console.log(`  Word: "${words[indexToMark]}"`);
+        console.log(`  Index: ${indexToMark}`);
+        console.log(`🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉\n`);
+        
+        // Mark current word as correct using captured index
         setWordStatuses(prev => {
           const newStatuses = [...prev];
-          newStatuses[currentWordIndex] = "correct";
-          if (currentWordIndex + 1 < words.length) {
-            newStatuses[currentWordIndex + 1] = "current";
+          console.log(`  📝 Setting wordStatuses[${indexToMark}] = "correct" (was: ${prev[indexToMark]})`);
+          newStatuses[indexToMark] = "correct";
+          if (indexToMark + 1 < words.length) {
+            console.log(`  📝 Setting wordStatuses[${indexToMark + 1}] = "current" (was: ${prev[indexToMark + 1]})`);
+            newStatuses[indexToMark + 1] = "current";
           }
+          console.log(`  📝 Updated statuses:`, newStatuses.slice(0, Math.min(5, newStatuses.length)));
           return newStatuses;
         });
         
-        setCurrentWordIndex(prev => prev + 1);
+        localWordIndex++; // Increment local index immediately
         
         // Show mini celebration every 5 words
-        if ((currentWordIndex + 1) % 5 === 0) {
+        if (localWordIndex % 5 === 0) {
           setShowCelebration(true);
           clearTimeout(celebrationTimeoutRef.current);
           celebrationTimeoutRef.current = setTimeout(() => {
             setShowCelebration(false);
           }, 1000);
         }
-      } else if (currentWordIndex + 1 < words.length) {
-        // Check if it matches the NEXT word (allow skipping difficult words)
-        const nextWord = words[currentWordIndex + 1];
-        const isNextMatch = wordsMatch(spokenWord, nextWord);
-        
-        if (isNextMatch) {
-          // Mark current as skipped, next as current
-          setWordStatuses(prev => {
-            const newStatuses = [...prev];
-            newStatuses[currentWordIndex] = "incorrect"; // Mark skipped word
-            newStatuses[currentWordIndex + 1] = "correct"; // Mark matched word as correct
-            if (currentWordIndex + 2 < words.length) {
-              newStatuses[currentWordIndex + 2] = "current";
-            }
-            return newStatuses;
-          });
-          
-          setCurrentWordIndex(prev => prev + 2); // Skip to word after next
-        }
       }
+      // Skip detection disabled to prevent false positives from advancing too far
     });
-  }, [currentWordIndex, words]);
+    
+    // Update state with final index after processing all words
+    if (localWordIndex !== currentWordIndex) {
+      console.log(`📊 Updating currentWordIndex: ${currentWordIndex} → ${localWordIndex}`);
+      setCurrentWordIndex(localWordIndex);
+    } else {
+      console.log(`📊 Index unchanged: ${currentWordIndex}`);
+    }
+  }, [currentWordIndex, words, isListening]);
 
   // Handle mic toggle
   const handleMicToggle = useCallback(() => {
     if (isListening) {
+      console.log("🛑 Stopping listening...");
       stopListening();
     } else {
+      console.log("\n🔄🔄🔄 RESETTING READING SESSION 🔄🔄🔄");
+      console.log("  Setting currentWordIndex: 0");
+      console.log("  Resetting all wordStatuses to pending (except first)");
+      // Reset everything for a fresh start
+      setCurrentWordIndex(0);
+      setWordStatuses(words.map((_, i) => (i === 0 ? "current" : "pending")));
       resetTranscript();
+      console.log("  Starting listening...");
       startListening();
+      console.log("🔄🔄🔄🔄🔄🔄🔄🔄🔄🔄🔄🔄🔄🔄🔄\n");
     }
-  }, [isListening, startListening, stopListening, resetTranscript]);
+  }, [isListening, startListening, stopListening, resetTranscript, words]);
 
   // Handle speaker - read current sentence aloud
   const handleSpeakerToggle = useCallback(() => {
@@ -232,13 +291,20 @@ const Reading = () => {
       <div className="px-4 py-3 bg-muted/50">
         <div className="flex items-center gap-3">
           <span className="text-2xl">{story.emoji}</span>
-          <div>
+          <div className="flex-1">
             <h1 className="font-display font-bold text-lg">{story.title}</h1>
             <p className="text-xs text-muted-foreground">
               {isListening 
                 ? "🎤 Estou ouvindo você ler..." 
                 : "Toque no microfone e leia em voz alta!"}
             </p>
+            {/* Show what Safari is hearing in real-time */}
+            {interimTranscript && (
+              <div className="mt-2 px-3 py-2 bg-primary/10 border border-primary/20 rounded-lg">
+                <p className="text-xs text-muted-foreground mb-0.5">Ouvindo agora:</p>
+                <p className="text-sm font-medium text-primary">{interimTranscript}</p>
+              </div>
+            )}
           </div>
         </div>
       </div>

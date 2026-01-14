@@ -70,6 +70,7 @@ export const useSpeechRecognition = ({
   const restartTimeoutRef = useRef<NodeJS.Timeout>();
   const consecutiveRestartsRef = useRef(0);
   const lastStartTimeRef = useRef<number>(0);
+  const lastResultTimeRef = useRef<number>(0); // Track last result to prevent rapid fire
   const isSafariRef = useRef(false);
   const onResultRef = useRef(onResult);
   const onErrorRef = useRef(onError);
@@ -106,14 +107,22 @@ export const useSpeechRecognition = ({
     recognition.lang = language;
     recognition.maxAlternatives = 1;
 
+    let sessionId = 0;
+    
     recognition.onstart = () => {
+      sessionId++;
+      const startTime = Date.now();
+      console.log(`🟢 recognition.onstart [Session ${sessionId}] at ${startTime}`);
       setIsListening(true);
-      lastStartTimeRef.current = Date.now();
+      lastStartTimeRef.current = startTime;
+      lastResultTimeRef.current = 0; // Reset result time on new session
       consecutiveRestartsRef.current = 0; // Reset counter on successful start
     };
 
     recognition.onend = () => {
-      const timeSinceStart = Date.now() - lastStartTimeRef.current;
+      const now = Date.now();
+      const timeSinceStart = now - lastStartTimeRef.current;
+      console.log(`🔴 recognition.onend [Session ${sessionId}] at ${now} (duration: ${timeSinceStart}ms)`);
       setIsListening(false);
       
       // Only auto-restart in continuous mode (non-Safari)
@@ -154,13 +163,31 @@ export const useSpeechRecognition = ({
     };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const now = Date.now();
+      const timeSinceStart = now - lastStartTimeRef.current;
+      
+      console.log(`🎯 SpeechRecognition onresult fired! [Session ${sessionId}]`);
+      console.log("  resultIndex:", event.resultIndex);
+      console.log("  total results:", event.results.length);
+      console.log("  ⏱️ Time since start:", timeSinceStart + "ms");
+      console.log("  ⏱️ lastStartTimeRef:", lastStartTimeRef.current, "| now:", now);
+      
       let finalTranscript = "";
       let interimResult = "";
 
+      let finalConfidence = 0;
+      
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
+        const confidence = result[0].confidence;
+        const confidenceDisplay = confidence !== undefined ? `${(confidence * 100).toFixed(0)}%` : "N/A (Safari)";
+        console.log(`  Result[${i}]: "${result[0].transcript}" (isFinal: ${result.isFinal}, confidence: ${confidenceDisplay})`);
+        
         if (result.isFinal) {
           finalTranscript += result[0].transcript;
+          // Safari often doesn't provide confidence - treat undefined as 1.0 (trust it)
+          const confidenceValue = confidence !== undefined ? confidence : 1.0;
+          finalConfidence = Math.max(finalConfidence, confidenceValue);
         } else {
           interimResult += result[0].transcript;
         }
@@ -171,15 +198,48 @@ export const useSpeechRecognition = ({
       
       // Only process FINAL results for word matching
       if (finalTranscript) {
+        const confidenceDisplay = finalConfidence === 1.0 ? "N/A (Safari default)" : `${(finalConfidence * 100).toFixed(0)}%`;
+        console.log("🎤 Final transcript from recognition:", finalTranscript);
+        console.log("🎯 Final confidence:", confidenceDisplay);
+        
+        // Check cooldown - prevent processing results too quickly (phantom words)
+        const timeSinceLastResult = lastResultTimeRef.current > 0 
+          ? now - lastResultTimeRef.current 
+          : 9999; // First result, allow it
+        
+        console.log("⏱️ Time since last result:", timeSinceLastResult + "ms");
+        
+        // Only apply cooldown if we have a valid previous timestamp
+        if (lastResultTimeRef.current > 0 && timeSinceLastResult < 300) {
+          console.log("⚠️ REJECTED: Too soon after previous result (cooldown: 300ms)");
+          return;
+        }
+        
+        // Check confidence threshold - only if Safari actually provided a confidence value
+        // Reject only if confidence is explicitly low (< 50%), not when undefined/1.0
+        if (finalConfidence < 1.0 && finalConfidence < 0.5) {
+          console.log(`⚠️ REJECTED: Low confidence ${(finalConfidence * 100).toFixed(0)}% (minimum: 50%)`);
+          return;
+        }
+        
+        console.log("✅ ACCEPTED: Passing validation, will process this word");
+        
+        // Update last result time
+        lastResultTimeRef.current = now;
+        
         setTranscript(prev => prev + " " + finalTranscript);
-        onResultRef.current?.(finalTranscript.trim().toLowerCase());
+        const wordToProcess = finalTranscript.trim().toLowerCase();
+        console.log("📤 Sending to onResult:", wordToProcess);
+        onResultRef.current?.(wordToProcess);
         
         // For Safari (non-continuous mode), restart recognition after getting result
         if (shouldBeListeningRef.current && isSafariRef.current) {
           // Small delay to ensure previous recognition has fully stopped
+          console.log("🔄 Safari: Scheduling auto-restart in 100ms...");
           setTimeout(() => {
             if (shouldBeListeningRef.current && recognitionRef.current) {
               try {
+                console.log("🔄 Safari: Auto-restarting recognition now");
                 // Only start if not already listening (prevents InvalidStateError)
                 recognitionRef.current.start();
               } catch (e) {
@@ -259,11 +319,15 @@ export const useSpeechRecognition = ({
     if (!recognitionRef.current || !isSupported) return;
     
     try {
+      const callTime = Date.now();
+      console.log(`\n🎤🎤🎤 STARTING NEW LISTENING SESSION 🎤🎤🎤 at ${callTime}\n`);
+      
       // Set flag that we want to be listening
       shouldBeListeningRef.current = true;
       
       setTranscript("");
       setInterimTranscript("");
+      console.log("📞 Calling recognition.start()...");
       recognitionRef.current.start();
     } catch (error: any) {
       // Handle specific error types
@@ -288,14 +352,18 @@ export const useSpeechRecognition = ({
   const stopListening = useCallback(() => {
     if (!recognitionRef.current) return;
     
-    // Set flag that we don't want to be listening anymore
+    const stopTime = Date.now();
+    console.log(`\n🛑 STOP LISTENING CALLED at ${stopTime}`);
+    
     shouldBeListeningRef.current = false;
     clearTimeout(restartTimeoutRef.current);
     
     try {
+      console.log("📞 Calling recognition.stop()...");
       recognitionRef.current.stop();
     } catch (error) {
-      console.error("Error stopping speech recognition:", error);
+      console.log("⚠️ Error on stop:", error);
+      // Ignore errors on stop
     }
   }, []);
 
