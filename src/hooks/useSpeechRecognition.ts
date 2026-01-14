@@ -96,17 +96,20 @@ export const useSpeechRecognition = ({
       return;
     }
 
-    // Detect Safari - it has issues with continuous mode
+    // Detect Safari for specific workarounds
     const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
     isSafariRef.current = isSafari;
     console.log("Browser detection - isSafari:", isSafari);
 
     const recognition = new SpeechRecognitionAPI();
-    // Safari works better without continuous mode
-    recognition.continuous = isSafari ? false : continuous;
+    // Use continuous:false for ALL browsers to avoid network timeout errors
+    // We implement manual restart for consistent behavior across browsers
+    recognition.continuous = false;
     recognition.interimResults = true;
     recognition.lang = language;
     recognition.maxAlternatives = 1;
+    
+    console.log("Recognition config: continuous=false (manual restart mode)");
 
     let sessionId = 0;
     
@@ -126,57 +129,38 @@ export const useSpeechRecognition = ({
       console.log(`🔴 recognition.onend [Session ${sessionId}] at ${now} (duration: ${timeSinceStart}ms)`);
       setIsListening(false);
       
-      // Auto-restart logic depends on browser and mode
+      // Auto-restart logic - UNIVERSAL for all browsers (continuous:false)
+      // This ensures consistent behavior and avoids network timeout errors
       if (shouldBeListeningRef.current) {
-        if (isSafariRef.current) {
-          // Safari: Always restart when onend is called (non-continuous mode)
-          // This ensures continuous listening even after errors
-          console.log("🔄 Safari onend: Scheduling restart in 150ms...");
-          clearTimeout(safariRestartTimeoutRef.current);
-          safariRestartTimeoutRef.current = setTimeout(() => {
-            if (shouldBeListeningRef.current && recognitionRef.current) {
-              try {
-                console.log("🔄 Safari onend: Restarting now");
-                recognitionRef.current.start();
-              } catch (error: any) {
-                if (error.name !== "InvalidStateError") {
-                  console.error("Failed to restart from onend:", error);
-                }
-              }
-            }
-          }, 150);
-        } else if (continuous) {
-          // Non-Safari browsers: Only restart in continuous mode
-          // Check if we're in a restart loop (ended too quickly)
-          if (timeSinceStart < 1000) {
-            consecutiveRestartsRef.current++;
-            
-            // If too many quick restarts, stop to prevent infinite loop
-            if (consecutiveRestartsRef.current > 5) {
-              console.error("Too many quick restarts - stopping auto-restart");
-              shouldBeListeningRef.current = false;
-              onErrorRef.current?.("O reconhecimento de voz não está funcionando. Tente novamente.");
-              return;
-            }
-          } else {
-            consecutiveRestartsRef.current = 0;
-          }
+        // Check if we're in a restart loop (ended too quickly)
+        if (timeSinceStart < 1000) {
+          consecutiveRestartsRef.current++;
           
-          clearTimeout(restartTimeoutRef.current);
-          restartTimeoutRef.current = setTimeout(() => {
-            if (shouldBeListeningRef.current && recognitionRef.current) {
-              try {
-                recognitionRef.current.start();
-              } catch (error: any) {
-                // Ignore InvalidStateError - recognition is already running
-                if (error.name !== "InvalidStateError") {
-                  console.error("Failed to auto-restart:", error);
-                  shouldBeListeningRef.current = false;
-                }
+          // If too many quick restarts, stop to prevent infinite loop
+          if (consecutiveRestartsRef.current > 5) {
+            console.error("Too many quick restarts - stopping auto-restart");
+            shouldBeListeningRef.current = false;
+            onErrorRef.current?.("O reconhecimento de voz não está funcionando. Tente novamente.");
+            return;
+          }
+        } else {
+          consecutiveRestartsRef.current = 0;
+        }
+        
+        console.log("🔄 onend: Scheduling restart in 150ms...");
+        clearTimeout(safariRestartTimeoutRef.current);
+        safariRestartTimeoutRef.current = setTimeout(() => {
+          if (shouldBeListeningRef.current && recognitionRef.current) {
+            try {
+              console.log("🔄 onend: Restarting recognition now");
+              recognitionRef.current.start();
+            } catch (error: any) {
+              if (error.name !== "InvalidStateError") {
+                console.error("Failed to restart from onend:", error);
               }
             }
-          }, 100);
-        }
+          }
+        }, 150);
       }
     };
 
@@ -245,28 +229,26 @@ export const useSpeechRecognition = ({
         console.log("📤 Sending to onResult:", wordToProcess);
         onResultRef.current?.(wordToProcess);
         
-        // For Safari (non-continuous mode), restart recognition after getting result
-        if (shouldBeListeningRef.current && isSafariRef.current) {
-          // Clear any existing Safari restart timeout to prevent multiple restarts
-          clearTimeout(safariRestartTimeoutRef.current);
-          
-          // Small delay to ensure previous recognition has fully stopped
-          console.log("🔄 Safari: Scheduling auto-restart in 150ms...");
-          safariRestartTimeoutRef.current = setTimeout(() => {
-            if (shouldBeListeningRef.current && recognitionRef.current) {
-              try {
-                console.log("🔄 Safari: Auto-restarting recognition now");
-                // Only start if not already listening (prevents InvalidStateError)
-                recognitionRef.current.start();
-              } catch (e: any) {
-                // If already started, just ignore the error and continue
-                if (e.name !== "InvalidStateError") {
-                  console.error("Error restarting after result:", e);
-                }
+        // For continuous:false mode (all browsers), restart after getting result
+        // Clear any existing restart timeout to prevent multiple restarts
+        clearTimeout(safariRestartTimeoutRef.current);
+        
+        // Small delay to ensure previous recognition has fully stopped
+        console.log("🔄 onresult: Scheduling auto-restart in 150ms...");
+        safariRestartTimeoutRef.current = setTimeout(() => {
+          if (shouldBeListeningRef.current && recognitionRef.current) {
+            try {
+              console.log("🔄 onresult: Auto-restarting recognition now");
+              // Only start if not already listening (prevents InvalidStateError)
+              recognitionRef.current.start();
+            } catch (e: any) {
+              // If already started, just ignore the error and continue
+              if (e.name !== "InvalidStateError") {
+                console.error("Error restarting after result:", e);
               }
             }
-          }, 150); // Increased delay to ensure clean restart
-        }
+          }
+        }, 150);
       }
       // Interim results are set but not processed for matching
     };
@@ -279,19 +261,24 @@ export const useSpeechRecognition = ({
       }
       
       // Handle critical errors that should stop recognition
-      const criticalErrors = ["not-allowed", "audio-capture", "network", "service-not-allowed"];
+      const criticalErrors = ["not-allowed", "audio-capture", "service-not-allowed"];
       if (criticalErrors.includes(event.error)) {
         console.error("Speech recognition critical error:", event.error);
         shouldBeListeningRef.current = false;
         clearTimeout(restartTimeoutRef.current);
+        clearTimeout(safariRestartTimeoutRef.current);
         setIsListening(false);
         if (event.error === "not-allowed") {
           setHasPermission(false);
           onPermissionDeniedRef.current?.();
         }
         onErrorRef.current?.(event.error);
+      } else if (event.error === "network") {
+        // Network errors are common in continuous:false mode - just log and continue
+        // The onend handler will restart automatically
+        console.warn("⚠️ Network error (non-critical) - will retry on next restart");
       } else if (event.error !== "no-speech" && event.error !== "aborted") {
-        // Non-critical errors still get reported but don't stop recognition
+        console.warn("Non-critical recognition error:", event.error);
         onErrorRef.current?.(event.error);
       }
       // "no-speech" and "aborted" errors are normal and can be ignored
