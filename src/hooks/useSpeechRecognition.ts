@@ -68,6 +68,7 @@ export const useSpeechRecognition = ({
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const shouldBeListeningRef = useRef(false);
   const restartTimeoutRef = useRef<NodeJS.Timeout>();
+  const safariRestartTimeoutRef = useRef<NodeJS.Timeout>(); // Separate timeout for Safari restarts
   const consecutiveRestartsRef = useRef(0);
   const lastStartTimeRef = useRef<number>(0);
   const lastResultTimeRef = useRef<number>(0); // Track last result to prevent rapid fire
@@ -125,40 +126,57 @@ export const useSpeechRecognition = ({
       console.log(`🔴 recognition.onend [Session ${sessionId}] at ${now} (duration: ${timeSinceStart}ms)`);
       setIsListening(false);
       
-      // Only auto-restart in continuous mode (non-Safari)
-      // In Safari (non-continuous), restart happens in onresult after each recognition
-      const effectiveContinuous = isSafariRef.current ? false : continuous;
-      
-      if (shouldBeListeningRef.current && effectiveContinuous) {
-        // Check if we're in a restart loop (ended too quickly)
-        if (timeSinceStart < 1000) {
-          consecutiveRestartsRef.current++;
-          
-          // If too many quick restarts, stop to prevent infinite loop
-          if (consecutiveRestartsRef.current > 5) {
-            console.error("Too many quick restarts - stopping auto-restart");
-            shouldBeListeningRef.current = false;
-            onErrorRef.current?.("O reconhecimento de voz não está funcionando. Tente novamente.");
-            return;
-          }
-        } else {
-          consecutiveRestartsRef.current = 0;
-        }
-        
-        clearTimeout(restartTimeoutRef.current);
-        restartTimeoutRef.current = setTimeout(() => {
-          if (shouldBeListeningRef.current && recognitionRef.current) {
-            try {
-              recognitionRef.current.start();
-            } catch (error: any) {
-              // Ignore InvalidStateError - recognition is already running
-              if (error.name !== "InvalidStateError") {
-                console.error("Failed to auto-restart:", error);
-                shouldBeListeningRef.current = false;
+      // Auto-restart logic depends on browser and mode
+      if (shouldBeListeningRef.current) {
+        if (isSafariRef.current) {
+          // Safari: Always restart when onend is called (non-continuous mode)
+          // This ensures continuous listening even after errors
+          console.log("🔄 Safari onend: Scheduling restart in 150ms...");
+          clearTimeout(safariRestartTimeoutRef.current);
+          safariRestartTimeoutRef.current = setTimeout(() => {
+            if (shouldBeListeningRef.current && recognitionRef.current) {
+              try {
+                console.log("🔄 Safari onend: Restarting now");
+                recognitionRef.current.start();
+              } catch (error: any) {
+                if (error.name !== "InvalidStateError") {
+                  console.error("Failed to restart from onend:", error);
+                }
               }
             }
+          }, 150);
+        } else if (continuous) {
+          // Non-Safari browsers: Only restart in continuous mode
+          // Check if we're in a restart loop (ended too quickly)
+          if (timeSinceStart < 1000) {
+            consecutiveRestartsRef.current++;
+            
+            // If too many quick restarts, stop to prevent infinite loop
+            if (consecutiveRestartsRef.current > 5) {
+              console.error("Too many quick restarts - stopping auto-restart");
+              shouldBeListeningRef.current = false;
+              onErrorRef.current?.("O reconhecimento de voz não está funcionando. Tente novamente.");
+              return;
+            }
+          } else {
+            consecutiveRestartsRef.current = 0;
           }
-        }, 100); // Increased delay for more stable restart
+          
+          clearTimeout(restartTimeoutRef.current);
+          restartTimeoutRef.current = setTimeout(() => {
+            if (shouldBeListeningRef.current && recognitionRef.current) {
+              try {
+                recognitionRef.current.start();
+              } catch (error: any) {
+                // Ignore InvalidStateError - recognition is already running
+                if (error.name !== "InvalidStateError") {
+                  console.error("Failed to auto-restart:", error);
+                  shouldBeListeningRef.current = false;
+                }
+              }
+            }
+          }, 100);
+        }
       }
     };
 
@@ -202,18 +220,13 @@ export const useSpeechRecognition = ({
         console.log("🎤 Final transcript from recognition:", finalTranscript);
         console.log("🎯 Final confidence:", confidenceDisplay);
         
-        // Check cooldown - prevent processing results too quickly (phantom words)
+        // Cooldown removed to allow multiple words in quick succession
+        // The word matching logic and confidence threshold provide sufficient validation
         const timeSinceLastResult = lastResultTimeRef.current > 0 
           ? now - lastResultTimeRef.current 
           : 9999; // First result, allow it
         
         console.log("⏱️ Time since last result:", timeSinceLastResult + "ms");
-        
-        // Only apply cooldown if we have a valid previous timestamp
-        if (lastResultTimeRef.current > 0 && timeSinceLastResult < 300) {
-          console.log("⚠️ REJECTED: Too soon after previous result (cooldown: 300ms)");
-          return;
-        }
         
         // Check confidence threshold - only if Safari actually provided a confidence value
         // Reject only if confidence is explicitly low (< 50%), not when undefined/1.0
@@ -234,22 +247,25 @@ export const useSpeechRecognition = ({
         
         // For Safari (non-continuous mode), restart recognition after getting result
         if (shouldBeListeningRef.current && isSafariRef.current) {
+          // Clear any existing Safari restart timeout to prevent multiple restarts
+          clearTimeout(safariRestartTimeoutRef.current);
+          
           // Small delay to ensure previous recognition has fully stopped
-          console.log("🔄 Safari: Scheduling auto-restart in 100ms...");
-          setTimeout(() => {
+          console.log("🔄 Safari: Scheduling auto-restart in 150ms...");
+          safariRestartTimeoutRef.current = setTimeout(() => {
             if (shouldBeListeningRef.current && recognitionRef.current) {
               try {
                 console.log("🔄 Safari: Auto-restarting recognition now");
                 // Only start if not already listening (prevents InvalidStateError)
                 recognitionRef.current.start();
-              } catch (e) {
+              } catch (e: any) {
                 // If already started, just ignore the error and continue
                 if (e.name !== "InvalidStateError") {
                   console.error("Error restarting after result:", e);
                 }
               }
             }
-          }, 100); // Increased delay to ensure clean restart
+          }, 150); // Increased delay to ensure clean restart
         }
       }
       // Interim results are set but not processed for matching

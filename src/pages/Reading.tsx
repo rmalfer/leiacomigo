@@ -133,6 +133,17 @@ const Reading = () => {
     console.log("=== Starting at index:", currentWordIndex);
     console.log("=== Expected word:", currentWordIndex < words.length ? words[currentWordIndex] : "NONE (finished)");
     
+    // IMPORTANT: Reset "incorrect" back to "current" for retry
+    // This allows the user to try again after making a mistake
+    setWordStatuses(prev => {
+      const newStatuses = [...prev];
+      if (newStatuses[currentWordIndex] === "incorrect") {
+        console.log(`🔄 Resetting word ${currentWordIndex} from "incorrect" to "current" for retry`);
+        newStatuses[currentWordIndex] = "current";
+      }
+      return newStatuses;
+    });
+    
     // Use local variable to track index during batch processing
     // This fixes the bug where currentWordIndex doesn't update during forEach
     let localWordIndex = currentWordIndex;
@@ -147,38 +158,23 @@ const Reading = () => {
       
       console.log(`  Result: ${isMatch ? "✓ MATCH" : "✗ NO MATCH"}`);
       
-      // Warn if Safari heard something completely different
-      if (!isMatch && spokenWord.length > 2 && expectedWord.length > 2) {
-        const lengthDiff = Math.abs(spokenWord.length - expectedWord.length);
-        if (lengthDiff > 2) {
-          console.warn(`  ⚠️ Safari heard "${spokenWord}" but expected "${expectedWord}" - very different!`);
-        }
-      }
+      // CRITICAL: Capture the index value BEFORE any state updates
+      const indexToMark = localWordIndex;
       
       if (isMatch) {
-        // CRITICAL: Capture the index value BEFORE any state updates
-        // to prevent closure capturing wrong value
-        const indexToMark = localWordIndex;
+        console.log(`\n🎉 CORRECT! Word "${words[indexToMark]}" at index ${indexToMark}`);
         
-        console.log(`\n🎉🎉🎉 WORD MARKED AS CORRECT! 🎉🎉🎉`);
-        console.log(`  Word: "${words[indexToMark]}"`);
-        console.log(`  Index: ${indexToMark}`);
-        console.log(`🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉\n`);
-        
-        // Mark current word as correct using captured index
+        // Mark current word as correct and advance
         setWordStatuses(prev => {
           const newStatuses = [...prev];
-          console.log(`  📝 Setting wordStatuses[${indexToMark}] = "correct" (was: ${prev[indexToMark]})`);
           newStatuses[indexToMark] = "correct";
           if (indexToMark + 1 < words.length) {
-            console.log(`  📝 Setting wordStatuses[${indexToMark + 1}] = "current" (was: ${prev[indexToMark + 1]})`);
             newStatuses[indexToMark + 1] = "current";
           }
-          console.log(`  📝 Updated statuses:`, newStatuses.slice(0, Math.min(5, newStatuses.length)));
           return newStatuses;
         });
         
-        localWordIndex++; // Increment local index immediately
+        localWordIndex++; // Advance to next word
         
         // Show mini celebration every 5 words
         if (localWordIndex % 5 === 0) {
@@ -188,8 +184,24 @@ const Reading = () => {
             setShowCelebration(false);
           }, 1000);
         }
+      } else {
+        // Word is incorrect - mark it but DON'T advance index
+        console.log(`\n❌ INCORRECT! Heard "${spokenWord}" but expected "${expectedWord}" at index ${indexToMark}`);
+        console.log(`   User needs to say "${expectedWord}" correctly to proceed`);
+        
+        setWordStatuses(prev => {
+          const newStatuses = [...prev];
+          newStatuses[indexToMark] = "incorrect";
+          return newStatuses;
+        });
+        
+        // DON'T increment localWordIndex - user must say the correct word
+        // The index stays at the current word until they get it right
+        
+        // Break out of forEach - don't process remaining words if we hit an error
+        // This prevents multiple incorrect markings in one go
+        return;
       }
-      // Skip detection disabled to prevent false positives from advancing too far
     });
     
     // Update state with final index after processing all words
